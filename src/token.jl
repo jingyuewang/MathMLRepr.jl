@@ -1,0 +1,835 @@
+# OPERATORS defines single characters that should be converted to an MML
+# operator element: <mo></mo>.  There are other MML operators that can not be
+# represented by a single ASCII character in TeX, e.g, \{, \}, \subset, \vee,
+# \cup, \in, \forall, \approx, etc. They are processed in the command reader.
+# chars in BRACKETS are converted to TK_PAREN type which will also be
+# converted to <mo> but could carry size attributes.
+const OPERATOR_IDS = "+-*/!:=,.\'"
+const BRACKETS = "|<>()[]"
+
+# types
+# NOTE: Most are not types in TeX, e.g., objects in TK_OPID just represent
+# regular symbols in TeX, but they will be converted to operator elements,
+# i.e., <mo> elements in MathML
+const TK_MATH = 0               # to the top elelment <math>
+const TK_ID = 1                 # to <mi>, single-char identifiers
+const TK_NUM = 2                # to <mn>
+#const TK_SYM = 3               # to <mi> with UCS codepoint literal
+const TK_FUN = 4                # to <mi>, multi-char identifiers
+#const TK_CMD = 5
+const TK_ENV = 6
+const TK_OPID = 7               # convert to <mo>
+# parenthesis' are also OPIDs. They are a little more special than single-char
+# OPIDs in that they are paired, and may be rendered in a specified size when
+# a \big TeX command is present (in this case, they are converted to <mo> with
+# `maxsize` or `minsize` attributes)
+const TK_PAREN = 8
+const TK_UNKNOWN = 9
+# types that need special layout treatment when sub-sup operators are present.
+# TK_LIMs are parsed to TK_FUN, which are ultimately just special identifiers.
+# TK_INTs and TK_BIGOPs are parsed to TK_OPID (they are math operator identifiers,
+# not true TeX language operators)
+const TK_LIM = 33               # \lim, \liminf, ... only subscripts
+const TK_INT = 34               # \int, ..., sub-super-scripts
+const TK_BIGOP = 35             # \sum, \prod, \bigcup, ..., sub-super-scripts
+
+# TeX language commands, each with its own type
+const TK_LBRACE = 11            # '{': initiate an expression group
+const TK_RBRACE = 12            # '}': end an expression group
+const TK_SUB = 13               # '-': subscript
+const TK_SUP = 14               # '^': superscript
+const TK_AMP = 15               # '&': ampersand
+const TK_NEWLINE = 16           # '\\': new line
+const TK_OPNAME = 70            # \operatorname
+const TK_TEXT = 41
+const TK_SQRT = 42
+const TK_FRAC = 43
+const TK_LEFT = 44
+const TK_RIGHT = 45
+const TK_MIDDLE = 46
+const TK_BEGIN = 47
+const TK_END = 48
+const TK_BINOM = 49
+const TK_OVERSET = 50
+const TK_UNDERSET = 51
+const TK_FRACOVER = 52
+# TK_OEVRACCENT(TK_UNDERACCENT) are tokens for TeX command: \dot,
+# \tilde, \hat, etc. The <mover> (<munder>) element carries an attrubute
+# `accent` which is set to be "true", e.g.,
+# "\hat{A}" is converted to
+#   <mover accent="true">
+#     <mi>A</mi>
+#     <mo> &#x5E;<!--CIRCUMFLEX ACCENT--></mo>
+#   </mover>
+const TK_OVERACCENT = 54
+const TK_UNDERACCENT = 55
+const TK_SPACE = 60
+const TK_BIG = 61
+# \overbrace (\underbrace) are converted to <mover> (<munder>). They could
+# carry a super(sub)-script.
+const TK_OVERBRACE = 52
+const TK_UNDERBRACE = 53
+
+# other MML operators
+
+# an expression group with specified style
+# It seems MathJax does not support mathvariant, we may not implement
+# style for now... need to do more experiments.
+const TK_STYLE = 100            # \mathrm, \mathcal, ... convert to <mstyle>
+const TK_IGSTYLE = 101          # in-group style: \bf, \it, \red, ...
+const TK_ENV_NAME = 110         # env-names that follow \begin(\end) commands
+const TK_ENV_ATTR = 111         # env-attributes that follow \begin(\end) commands
+
+
+struct Token
+    type::Int
+    val::String
+end
+Token(t::Int, v::Char) = Token(t, string(v))
+
+# symbols are copied from `latex_symbols.jl` in the `REPL` module.
+const command_to_token = Dict(
+    # styles
+    "mathbf"     => Token(TK_STYLE, "mathbf"),
+    "mathcal"    => Token(TK_STYLE, "mathcal"),
+    "mathbb"     => Token(TK_STYLE, "mathbb"),
+    "mathfrak"   => Token(TK_STYLE, "mathfrak"),
+    "bigl"       => Token(TK_BIG, "1.2em"),
+    "bigr"       => Token(TK_BIG, "1.2em"),
+    "Bigl"       => Token(TK_BIG, "1.623em"),
+    "Bigr"       => Token(TK_BIG, "1.623em"),
+    "biggl"      => Token(TK_BIG, "2.047em"),
+    "biggr"      => Token(TK_BIG, "2.047em"),
+    "Biggl"      => Token(TK_BIG, "2.470em"),
+    "Biggr"      => Token(TK_BIG, "2.470em"),
+    "it"         => Token(TK_IGSTYLE, "it"),
+    "bf"         => Token(TK_IGSTYLE, "bf"),
+    "rm"         => Token(TK_IGSTYLE, "rf"),
+    # commands
+    "text"          => Token(TK_TEXT, ""),
+    "sqrt"          => Token(TK_SQRT, ""),
+    "frac"          => Token(TK_FRAC, ""),
+    "over"          => Token(TK_FRACOVER, ""),
+    "binom"         => Token(TK_BINOM, ""),
+    "left"          => Token(TK_LEFT, ""),
+    "right"         => Token(TK_RIGHT, ""),
+#    "middle"        => Token(TK_MIDDLE, ""),
+    "begin"         => Token(TK_BEGIN, ""),
+    "end"           => Token(TK_END, ""),
+    "overset"       => Token(TK_OVERSET, ""),
+    "underset"      => Token(TK_UNDERSET, ""),
+    # if \overbrace (\underspace) carries a super-script (sub-script)
+    # operator, it has to be dealt with specially as the result is NOT
+    # a usual super-scripted (sub-scripted) glyph.
+    "overbrace"     => Token(TK_OVERBRACE, '\u23de'),
+    "underbrace"    => Token(TK_UNDERBRACE, '\u23df'),
+    # operator name
+    "operatorname"  => Token(TK_OPNAME, ""),
+    # over/under-script operator as accent
+    "dot"               => Token(TK_OVERACCENT, '˙'),
+    "ddot"              => Token(TK_OVERACCENT, '¨'),
+    "bar"               => Token(TK_OVERACCENT, '¯'),
+    "hat"               => Token(TK_OVERACCENT, '^'),
+    "check"             => Token(TK_OVERACCENT, 'ˇ'),
+    "breve"             => Token(TK_OVERACCENT, '˘'),
+    "acute"             => Token(TK_OVERACCENT, '´'),
+    "grave"             => Token(TK_OVERACCENT, '`'),
+    "tilde"             => Token(TK_OVERACCENT, '~'),
+    "vec"               => Token(TK_OVERACCENT, '→'),
+    "overline"          => Token(TK_OVERACCENT, '_'),
+    "underline"         => Token(TK_OVERACCENT, '_'),
+    "widehat"           => Token(TK_OVERACCENT, '^'),
+    "widetilde"         => Token(TK_OVERACCENT, '~'),
+    "overrightarrow"    => Token(TK_OVERACCENT, '→'),
+    "overleftarrow"     => Token(TK_OVERACCENT, '←'),
+    # spaces and new-line
+    # Space tokens are conveted to <mspace> elements
+    # new-line is also converted to <mspace> with `linebreak="newline"`
+    "\\"         => Token(TK_NEWLINE, ""),
+    "!"          => Token(TK_SPACE, "-0.167em"),    # -3./18.
+    ","          => Token(TK_SPACE, "0.167em"),     #  3./18. 
+    ":"          => Token(TK_SPACE, "0.222em"),     #  4./18.
+    ";"          => Token(TK_SPACE, "0.278em"),     #  5./18"
+    " "          => Token(TK_SPACE, "1.0em"),       #  1.
+    "quad"       => Token(TK_SPACE, "1.0em"),       #  1.
+    "qquad"      => Token(TK_SPACE, "2.0em"),       #  2.
+    # parenthesis
+    # parenthesis token are converted to either <mo> or <mo> with sizes if
+    # \left (\right) command is present
+    "langle"     => Token(TK_PAREN, "⟨"),
+    "rangle"     => Token(TK_PAREN, "⟩"),
+    "{"          => Token(TK_PAREN, "{"),
+    "}"          => Token(TK_PAREN, "}"),
+    "lceil"      => Token(TK_PAREN, "⌈"),
+    "rceil"      => Token(TK_PAREN, "⌉"),
+    "lfloor"     => Token(TK_PAREN, "⌊"),
+    "rfloor"     => Token(TK_PAREN, "⌋"),
+    "|"          => Token(TK_PAREN, '∥'),
+    # \lim, \int, and \bigop, we might need some special treatment?
+    "lim"        => Token(TK_LIM, "lim"),
+    "liminf"     => Token(TK_LIM, "lim inf"),
+    "limsup"     => Token(TK_LIM, "lim sup"),
+    "min"        => Token(TK_LIM, "min"),
+    "max"        => Token(TK_LIM, "max"),
+    "inf"        => Token(TK_LIM, "inf"),
+    "sup"        => Token(TK_LIM, "sup"),
+    "int"        => Token(TK_INT, '∫'),
+    "iint"       => Token(TK_INT, '∬'),
+    "iiint"      => Token(TK_INT, '∭'),
+    "oint"       => Token(TK_INT, '∮'),
+    "sum"        => Token(TK_BIGOP, '∑'),
+    "prod"       => Token(TK_BIGOP, '∏'),
+    "coprod"     => Token(TK_BIGOP, '∐'),
+    "bigcap"     => Token(TK_BIGOP, '⋂'),
+    "bigcup"     => Token(TK_BIGOP, '⋃'),
+    "bigsqcup"   => Token(TK_BIGOP, '⨆'),
+    "bigvee"     => Token(TK_BIGOP, '⋁'),
+    "bigwedge"   => Token(TK_BIGOP, '⋀'),
+    "bigodot"    => Token(TK_BIGOP, '⨀'),
+    "bitotimes"  => Token(TK_BIGOP, '⨂'),
+    "bigoplus"   => Token(TK_BIGOP, '⨁'),
+    "biguplus"   => Token(TK_BIGOP, '⨄'),
+
+    # environments
+    "matrix"     => Token(TK_ENV, "matrix"),
+    "pmatrix"    => Token(TK_ENV, "pmatrix"),
+    "bmatrix"    => Token(TK_ENV, "bmatrix"),
+    "vmatrix"    => Token(TK_ENV, "vmatrix"),
+
+    # symbols
+    "Alpha"      => Token(TK_ID, 'Α'),
+    "alpha"      => Token(TK_ID, 'α'),
+    "Beta"       => Token(TK_ID, 'Β'),
+    "beta"       => Token(TK_ID, 'β'),
+    "Gamma"      => Token(TK_ID, 'Γ'),
+    "gamma"      => Token(TK_ID, 'γ'),
+    "digamma"    => Token(TK_ID, 'ϝ'),
+    "Delta"      => Token(TK_ID, 'Δ'),
+    "delta"      => Token(TK_ID, 'δ'),
+    "Epsilon"    => Token(TK_ID, 'Ε'),
+    "epsilon"    => Token(TK_ID, 'ϵ'),
+    "varepsilon" => Token(TK_ID, 'ε'),
+    "Zeta"       => Token(TK_ID, 'Ζ'),
+    "zeta"       => Token(TK_ID, 'ζ'),
+    "Eta"        => Token(TK_ID, 'Η'),
+    "eta"        => Token(TK_ID, 'η'),
+    "Theta"      => Token(TK_ID, 'Θ'),
+    "theta"      => Token(TK_ID, 'θ'),
+    "vartheta"   => Token(TK_ID, 'ϑ'),
+    "Iota"       => Token(TK_ID, 'Ι'),
+    "iota"       => Token(TK_ID, 'ι'),
+    "Kappa"      => Token(TK_ID, 'Κ'),
+    "kappa"      => Token(TK_ID, 'κ'),
+    "Lambda"     => Token(TK_ID, 'Λ'),
+    "lambda"     => Token(TK_ID, 'λ'),
+    "Mu"         => Token(TK_ID, 'Μ'),
+    "mu"         => Token(TK_ID, 'μ'),
+    "Nu"         => Token(TK_ID, 'Ν'),
+    "nu"         => Token(TK_ID, 'ν'),
+    "Xi"         => Token(TK_ID, 'Ξ'),
+    "xi"         => Token(TK_ID, 'ξ'),
+    "Omicron"    => Token(TK_ID, 'Ο'),
+    "omicron"    => Token(TK_ID, 'ο'),
+    "Pi"         => Token(TK_ID, 'Π'),
+    "pi"         => Token(TK_ID, 'π'),
+    "varpi"      => Token(TK_ID, 'ϖ'),
+    "Rho"        => Token(TK_ID, 'Ρ'),
+    "rho"        => Token(TK_ID, 'ρ'),
+    "varrho"     => Token(TK_ID, 'ϱ'),
+    "Sigma"      => Token(TK_ID, 'Σ'),
+    "sigma"      => Token(TK_ID, 'σ'),
+    "varsigma"   => Token(TK_ID, 'ς'),
+    "Tau"        => Token(TK_ID, 'Τ'),
+    "tau"        => Token(TK_ID, 'τ'),
+    "Upsilon"    => Token(TK_ID, 'Υ'),
+    "upsilon"    => Token(TK_ID, 'υ'),
+    "Phi"        => Token(TK_ID, 'Φ'),
+    "phi"        => Token(TK_ID, 'ϕ'),
+    "varphi"     => Token(TK_ID, 'φ'),
+    "Chi"        => Token(TK_ID, 'Χ'),
+    "chi"        => Token(TK_ID, 'χ'),
+    "Psi"        => Token(TK_ID, 'Ψ'),
+    "psi"        => Token(TK_ID, 'ψ'),
+    "Omega"      => Token(TK_ID, 'Ω'),
+    "omega"      => Token(TK_ID, 'ω'),
+    "aleph"      => Token(TK_ID, 'ℵ'),
+    "O"          => Token(TK_ID, 'Ø'),
+    "o"          => Token(TK_ID, 'ø'),
+    "ss"         => Token(TK_ID, 'ß'),
+    "imath"      => Token(TK_ID, 'ı'),
+    "jmath"      => Token(TK_ID, 'ȷ'),
+    "ell"        => Token(TK_ID, 'ℓ'),
+    "hbar"       => Token(TK_ID, 'ℏ'),
+    "hslash"     => Token(TK_ID, 'ℏ'),
+    "infty"      => Token(TK_ID, '∞'),
+    "Re"         => Token(TK_ID, 'ℜ'),
+    "Im"         => Token(TK_ID, 'ℑ'),
+    "complement" => Token(TK_ID, '∁'),
+    "emptyset"   => Token(TK_ID, '∅'),
+    "therefore"  => Token(TK_ID, '∴'),
+    "because"    => Token(TK_ID, '∵'),
+    "Diamond"    => Token(TK_ID, '◊'),
+    "Box"        => Token(TK_ID, '◻'),
+    "triangle"   => Token(TK_ID, '△'),
+    "angle"      => Token(TK_ID, '∠'),
+    # function names
+    "sin"        => Token(TK_FUN, "sin"),
+    "cos"        => Token(TK_FUN, "cos"),
+    "tan"        => Token(TK_FUN, "tan"),
+    "csc"        => Token(TK_FUN, "csc"),
+    "sec"        => Token(TK_FUN, "sec"),
+    "cot"        => Token(TK_FUN, "cot"),
+    "arcsin"     => Token(TK_FUN, "arcsin"),
+    "arccos"     => Token(TK_FUN, "arccos"),
+    "arctan"     => Token(TK_FUN, "arctan"),
+    "sinh"       => Token(TK_FUN, "sinh"),
+    "cosh"       => Token(TK_FUN, "cosh"),
+    "tanh"       => Token(TK_FUN, "tanh"),
+    "coth"       => Token(TK_FUN, "coth"),
+    "exp"        => Token(TK_FUN, "exp"),
+    "ln"         => Token(TK_FUN, "ln"),
+    "log"        => Token(TK_FUN, "log"),
+    "erf"        => Token(TK_FUN, "erf"),
+    "erfc"       => Token(TK_FUN, "erfc"),
+    "arg"        => Token(TK_FUN, "arg"),
+    "ker"        => Token(TK_FUN, "ker"),
+    "dim"        => Token(TK_FUN, "dim"),
+    "det"        => Token(TK_FUN, "det"),
+    # operators, mostly infix, some are prefix
+    "times"              => Token(TK_OPID, '×'),
+    "oplus"              => Token(TK_OPID, '⊕'),
+    "ominus"             => Token(TK_OPID, '⊖'),
+    "otimes"             => Token(TK_OPID, '⊗'),
+    "oslash"             => Token(TK_OPID, '⊘'),
+    "odot"               => Token(TK_OPID, '⊙'),
+    "bigcirc"            => Token(TK_OPID, '◯'),
+    "amalg"              => Token(TK_OPID, '⨿'),
+    "pm"                 => Token(TK_OPID, '±'),
+    "mp"                 => Token(TK_OPID, '∓'),
+    "cdot"               => Token(TK_OPID, '·'),
+    "cdots"              => Token(TK_OPID, '⋯'),
+    "vdots"              => Token(TK_OPID, '⋮'),
+    "ldots"              => Token(TK_OPID, '…'),
+    "ddots"              => Token(TK_OPID, '⋱'),
+    "circ"               => Token(TK_OPID, '∘'),
+    "bullet"             => Token(TK_OPID, '∙'),
+    "star"               => Token(TK_OPID, '⋆'),
+    "div"                => Token(TK_OPID, '÷'),
+    "lnot"               => Token(TK_OPID, '¬'),
+    "land"               => Token(TK_OPID, '∧'),
+    "lor"                => Token(TK_OPID, '∨'),
+    "sim"                => Token(TK_OPID, '∼'),
+    "simeq"              => Token(TK_OPID, '≃'),
+    "nsim"               => Token(TK_OPID, '≁'),
+    "cong"               => Token(TK_OPID, '≅'),
+    "approx"             => Token(TK_OPID, '≈'),
+    "ne"                 => Token(TK_OPID, '≠'),
+    "neq"                => Token(TK_OPID, '≠'),
+    "equiv"              => Token(TK_OPID, '≡'),
+    "nequiv"             => Token(TK_OPID, '≢'),
+    "prec"               => Token(TK_OPID, '≺'),
+    "succ"               => Token(TK_OPID, '≻'),
+    "preceq"             => Token(TK_OPID, '⪯'),
+    "succeq"             => Token(TK_OPID, '⪰'),
+    "dashv"              => Token(TK_OPID, '⊣'),
+    "asymp"              => Token(TK_OPID, '≍'),
+    "doteq"              => Token(TK_OPID, '≐'),
+    "propto"             => Token(TK_OPID, '∝'),
+    "barwedge"           => Token(TK_OPID, '⊼'),
+    "ltimes"             => Token(TK_OPID, '⋉'),
+    "rtimes"             => Token(TK_OPID, '⋊'),
+    "Join"               => Token(TK_OPID, '⋈'),
+    "lhd"                => Token(TK_OPID, '⊲'),
+    "rhd"                => Token(TK_OPID, '⊳'),
+    "unlhd"              => Token(TK_OPID, '⊴'),
+    "unrhd"              => Token(TK_OPID, '⊵'),
+    "vee"                => Token(TK_OPID, '∨'),
+    "uplus"              => Token(TK_OPID, '⊎'),
+    "wedge"              => Token(TK_OPID, '∧'),
+    "veebar"             => Token(TK_OPID, '⊻'),
+    "cap"                => Token(TK_OPID, '∩'),
+    "cup"                => Token(TK_OPID, '∪'),
+    "mid"                => Token(TK_OPID, '∣'),
+    "nmid"               => Token(TK_OPID, '∤'),
+    "parallel"           => Token(TK_OPID, '∥'),
+    "perp"               => Token(TK_OPID, '⊥'),
+    "forall"             => Token(TK_OPID, '∀'),
+    "exists"             => Token(TK_OPID, '∃'),
+    "nexists"            => Token(TK_OPID, '∄'),
+    "lt"                 => Token(TK_OPID, '<'),
+    "gt"                 => Token(TK_OPID, '>'),
+    "leq"                => Token(TK_OPID, '≤'),
+    "geq"                => Token(TK_OPID, '≥'),
+    "ll"                 => Token(TK_OPID, '≪'),
+    "gg"                 => Token(TK_OPID, '≫'),
+    "lessapprox"         => Token(TK_OPID, '⪅'),
+    "lesssim"            => Token(TK_OPID, '≲'),
+    "eqslantless"        => Token(TK_OPID, '⪕'),
+    "leqslant"           => Token(TK_OPID, '⩽'),
+    "leqq"               => Token(TK_OPID, '≦'),
+    "geqq"               => Token(TK_OPID, '≧'),
+    "geqslant"           => Token(TK_OPID, '⩾'),
+    "eqslantgtr"         => Token(TK_OPID, '⪖'),
+    "gtrsim"             => Token(TK_OPID, '≳'),
+    "gtrapprox"          => Token(TK_OPID, '⪆'),
+    "approxeq"           => Token(TK_OPID, '≊'),
+    "lessdot"            => Token(TK_OPID, '⋖'),
+    "lll"                => Token(TK_OPID, '⋘'),
+    "lessgtr"            => Token(TK_OPID, '≶'),
+    "lesseqgtr"          => Token(TK_OPID, '⋚'),
+    "lesseqqgtr"         => Token(TK_OPID, '⪋'),
+    "doteqdot"           => Token(TK_OPID, '≑'),
+    "leftarrow"          => Token(TK_OPID, '←'),
+    "gets"               => Token(TK_OPID, '←'),
+    "rightarrow"         => Token(TK_OPID, '→'),
+    "to"                 => Token(TK_OPID, '→'),
+    "nleftarrow"         => Token(TK_OPID, '↚'),
+    "nrightarrow"        => Token(TK_OPID, '↛'),
+    "leftrightarrow"     => Token(TK_OPID, '↔'),
+    "nleftrightarrow"    => Token(TK_OPID, '↮'),
+    "longleftarrow"      => Token(TK_OPID, '⟵'),
+    "longrightarrow"     => Token(TK_OPID, '⟶'),
+    "longleftrightarrow" => Token(TK_OPID, '⟷'),
+    "Leftarrow"          => Token(TK_OPID, '⇐'),
+    "Rightarrow"         => Token(TK_OPID, '⇒'),
+    "nLeftarrow"         => Token(TK_OPID, '⇍'),
+    "nRightarrow"        => Token(TK_OPID, '⇏'),
+    "uparrow"            => Token(TK_OPID, '↑'),
+    "downarrow"          => Token(TK_OPID, '↓'),
+    "updownarrow"        => Token(TK_OPID, '↕'),
+    "in"                 => Token(TK_OPID, '∈'),
+    "ni"                 => Token(TK_OPID, '∉'),
+    "notin"              => Token(TK_OPID, '∉'),
+    "subset"             => Token(TK_OPID, '⊂'),
+    "supset"             => Token(TK_OPID, '⊃'),
+    "subseteq"           => Token(TK_OPID, '⊆'),
+    "supseteq"           => Token(TK_OPID, '⊇'),
+    "nsubseteq"          => Token(TK_OPID, '⊈'),
+    "nsupseteq"          => Token(TK_OPID, '⊉'),
+    "subsetneq"          => Token(TK_OPID, '⊊'),
+    "supsetneq"          => Token(TK_OPID, '⊋'),
+    "sqsubset"           => Token(TK_OPID, '⊏'),
+    "sqsubseteq"         => Token(TK_OPID, '⊑'),
+    "sqsupset"           => Token(TK_OPID, '⊐'),
+    "sqsupseteq"         => Token(TK_OPID, '⊒'),
+    "sqcap"              => Token(TK_OPID, '⊓'),
+    "sqcup"              => Token(TK_OPID, '⊔'),
+    "setminus"           => Token(TK_OPID, '∖'),
+    "partial"            => Token(TK_OPID, '∂'),
+    "nabla"              => Token(TK_OPID, '∇'),
+    "__final__"  => Token(TK_ID, "__final__")
+   )
+
+const unicode_to_optoken = Dict(
+    # integrals and big operators
+    '∫' => Token(TK_INT, '∫'),
+    '∬' => Token(TK_INT, '∬'),
+    '∭' => Token(TK_INT, '∭'),
+    '∮' => Token(TK_INT, '∮'),
+    '∑' => Token(TK_BIGOP, '∑'),
+    '∏' => Token(TK_BIGOP, '∏'),
+    '∐' => Token(TK_BIGOP, '∐'),
+    '⋂' => Token(TK_BIGOP, '⋂'),
+    '⋃' => Token(TK_BIGOP, '⋃'),
+    '⨆' => Token(TK_BIGOP, '⨆'),
+    '⋁' => Token(TK_BIGOP, '⋁'),
+    '⋀' => Token(TK_BIGOP, '⋀'),
+    '⨀' => Token(TK_BIGOP, '⨀'),
+    '⨂' => Token(TK_BIGOP, '⨂'),
+    '⨁' => Token(TK_BIGOP, '⨁'),
+    '⨄' => Token(TK_BIGOP, '⨄'),
+    # operators
+    '×' => Token(TK_OPID, '×'),
+    '⊕' => Token(TK_OPID, '⊕'),
+    '⊖' => Token(TK_OPID, '⊖'),
+    '⊗' => Token(TK_OPID, '⊗'),
+    '⊘' => Token(TK_OPID, '⊘'),
+    '⊙' => Token(TK_OPID, '⊙'),
+    '◯' => Token(TK_OPID, '◯'),
+    '⨿' => Token(TK_OPID, '⨿'),
+    '±' => Token(TK_OPID, '±'),
+    '∓' => Token(TK_OPID, '∓'),
+    '·' => Token(TK_OPID, '·'),
+    '⋯' => Token(TK_OPID, '⋯'),
+    '⋮' => Token(TK_OPID, '⋮'),
+    '…' => Token(TK_OPID, '…'),
+    '⋱' => Token(TK_OPID, '⋱'),
+    '∘' => Token(TK_OPID, '∘'),
+    '∙' => Token(TK_OPID, '∙'),
+    '⋆' => Token(TK_OPID, '⋆'),
+    '÷' => Token(TK_OPID, '÷'),
+    '¬' => Token(TK_OPID, '¬'),
+    '∧' => Token(TK_OPID, '∧'),
+    '∨' => Token(TK_OPID, '∨'),
+    '∼' => Token(TK_OPID, '∼'),
+    '≃' => Token(TK_OPID, '≃'),
+    '≁' => Token(TK_OPID, '≁'),
+    '≅' => Token(TK_OPID, '≅'),
+    '≈' => Token(TK_OPID, '≈'),
+    '≠' => Token(TK_OPID, '≠'),
+    '≠' => Token(TK_OPID, '≠'),
+    '≡' => Token(TK_OPID, '≡'),
+    '≢' => Token(TK_OPID, '≢'),
+    '≺' => Token(TK_OPID, '≺'),
+    '≻' => Token(TK_OPID, '≻'),
+    '⪯' => Token(TK_OPID, '⪯'),
+    '⪰' => Token(TK_OPID, '⪰'),
+    '⊣' => Token(TK_OPID, '⊣'),
+    '≍' => Token(TK_OPID, '≍'),
+    '≐' => Token(TK_OPID, '≐'),
+    '∝' => Token(TK_OPID, '∝'),
+    '⊼' => Token(TK_OPID, '⊼'),
+    '⋉' => Token(TK_OPID, '⋉'),
+    '⋊' => Token(TK_OPID, '⋊'),
+    '⋈' => Token(TK_OPID, '⋈'),
+    '⊲' => Token(TK_OPID, '⊲'),
+    '⊳' => Token(TK_OPID, '⊳'),
+    '⊴' => Token(TK_OPID, '⊴'),
+    '⊵' => Token(TK_OPID, '⊵'),
+    '∨' => Token(TK_OPID, '∨'),
+    '⊎' => Token(TK_OPID, '⊎'),
+    '∧' => Token(TK_OPID, '∧'),
+    '⊻' => Token(TK_OPID, '⊻'),
+    '∩' => Token(TK_OPID, '∩'),
+    '∪' => Token(TK_OPID, '∪'),
+    '∣' => Token(TK_OPID, '∣'),
+    '∤' => Token(TK_OPID, '∤'),
+    '∥' => Token(TK_OPID, '∥'),
+    '⊥' => Token(TK_OPID, '⊥'),
+    '∀' => Token(TK_OPID, '∀'),
+    '∃' => Token(TK_OPID, '∃'),
+    '∄' => Token(TK_OPID, '∄'),
+    '<' => Token(TK_OPID, '<'),
+    '>' => Token(TK_OPID, '>'),
+    '≤' => Token(TK_OPID, '≤'),
+    '≥' => Token(TK_OPID, '≥'),
+    '≪' => Token(TK_OPID, '≪'),
+    '≫' => Token(TK_OPID, '≫'),
+    '⪅' => Token(TK_OPID, '⪅'),
+    '≲' => Token(TK_OPID, '≲'),
+    '⪕' => Token(TK_OPID, '⪕'),
+    '⩽' => Token(TK_OPID, '⩽'),
+    '≦' => Token(TK_OPID, '≦'),
+    '≧' => Token(TK_OPID, '≧'),
+    '⩾' => Token(TK_OPID, '⩾'),
+    '⪖' => Token(TK_OPID, '⪖'),
+    '≳' => Token(TK_OPID, '≳'),
+    '⪆' => Token(TK_OPID, '⪆'),
+    '≊' => Token(TK_OPID, '≊'),
+    '⋖' => Token(TK_OPID, '⋖'),
+    '⋘' => Token(TK_OPID, '⋘'),
+    '≶' => Token(TK_OPID, '≶'),
+    '⋚' => Token(TK_OPID, '⋚'),
+    '⪋' => Token(TK_OPID, '⪋'),
+    '≑' => Token(TK_OPID, '≑'),
+    '←' => Token(TK_OPID, '←'),
+    '←' => Token(TK_OPID, '←'),
+    '→' => Token(TK_OPID, '→'),
+    '→' => Token(TK_OPID, '→'),
+    '↚' => Token(TK_OPID, '↚'),
+    '↛' => Token(TK_OPID, '↛'),
+    '↔' => Token(TK_OPID, '↔'),
+    '↮' => Token(TK_OPID, '↮'),
+    '⟵' => Token(TK_OPID, '⟵'),
+    '⟶' => Token(TK_OPID, '⟶'),
+    '⟷' => Token(TK_OPID, '⟷'),
+    '⇐' => Token(TK_OPID, '⇐'),
+    '⇒' => Token(TK_OPID, '⇒'),
+    '⇍' => Token(TK_OPID, '⇍'),
+    '⇏' => Token(TK_OPID, '⇏'),
+    '↑' => Token(TK_OPID, '↑'),
+    '↓' => Token(TK_OPID, '↓'),
+    '↕' => Token(TK_OPID, '↕'),
+    '∈' => Token(TK_OPID, '∈'),
+    '∉' => Token(TK_OPID, '∉'),
+    '∉' => Token(TK_OPID, '∉'),
+    '⊂' => Token(TK_OPID, '⊂'),
+    '⊃' => Token(TK_OPID, '⊃'),
+    '⊆' => Token(TK_OPID, '⊆'),
+    '⊇' => Token(TK_OPID, '⊇'),
+    '⊈' => Token(TK_OPID, '⊈'),
+    '⊉' => Token(TK_OPID, '⊉'),
+    '⊊' => Token(TK_OPID, '⊊'),
+    '⊋' => Token(TK_OPID, '⊋'),
+    '⊏' => Token(TK_OPID, '⊏'),
+    '⊑' => Token(TK_OPID, '⊑'),
+    '⊐' => Token(TK_OPID, '⊐'),
+    '⊒' => Token(TK_OPID, '⊒'),
+    '⊓' => Token(TK_OPID, '⊓'),
+    '⊔' => Token(TK_OPID, '⊔'),
+    '∖' => Token(TK_OPID, '∖'),
+    '∂' => Token(TK_OPID, '∂'),
+    '∇' => Token(TK_OPID, '∇')
+)
+
+const _to_mathbf = Dict(
+    "A" => "𝐀",  # mathematical bold capital a
+    "B" => "𝐁",  # mathematical bold capital b
+    "C" => "𝐂",  # mathematical bold capital c
+    "D" => "𝐃",  # mathematical bold capital d
+    "E" => "𝐄",  # mathematical bold capital e
+    "F" => "𝐅",  # mathematical bold capital f
+    "G" => "𝐆",  # mathematical bold capital g
+    "H" => "𝐇",  # mathematical bold capital h
+    "I" => "𝐈",  # mathematical bold capital i
+    "J" => "𝐉",  # mathematical bold capital j
+    "K" => "𝐊",  # mathematical bold capital k
+    "L" => "𝐋",  # mathematical bold capital l
+    "M" => "𝐌",  # mathematical bold capital m
+    "N" => "𝐍",  # mathematical bold capital n
+    "O" => "𝐎",  # mathematical bold capital o
+    "P" => "𝐏",  # mathematical bold capital p
+    "Q" => "𝐐",  # mathematical bold capital q
+    "R" => "𝐑",  # mathematical bold capital r
+    "S" => "𝐒",  # mathematical bold capital s
+    "T" => "𝐓",  # mathematical bold capital t
+    "U" => "𝐔",  # mathematical bold capital u
+    "V" => "𝐕",  # mathematical bold capital v
+    "W" => "𝐖",  # mathematical bold capital w
+    "X" => "𝐗",  # mathematical bold capital x
+    "Y" => "𝐘",  # mathematical bold capital y
+    "Z" => "𝐙",  # mathematical bold capital z
+    "a" => "𝐚",  # mathematical bold small a
+    "b" => "𝐛",  # mathematical bold small b
+    "c" => "𝐜",  # mathematical bold small c
+    "d" => "𝐝",  # mathematical bold small d
+    "e" => "𝐞",  # mathematical bold small e
+    "f" => "𝐟",  # mathematical bold small f
+    "g" => "𝐠",  # mathematical bold small g
+    "h" => "𝐡",  # mathematical bold small h
+    "i" => "𝐢",  # mathematical bold small i
+    "j" => "𝐣",  # mathematical bold small j
+    "k" => "𝐤",  # mathematical bold small k
+    "l" => "𝐥",  # mathematical bold small l
+    "m" => "𝐦",  # mathematical bold small m
+    "n" => "𝐧",  # mathematical bold small n
+    "o" => "𝐨",  # mathematical bold small o
+    "p" => "𝐩",  # mathematical bold small p
+    "q" => "𝐪",  # mathematical bold small q
+    "r" => "𝐫",  # mathematical bold small r
+    "s" => "𝐬",  # mathematical bold small s
+    "t" => "𝐭",  # mathematical bold small t
+    "u" => "𝐮",  # mathematical bold small u
+    "v" => "𝐯",  # mathematical bold small v
+    "w" => "𝐰",  # mathematical bold small w
+    "x" => "𝐱",  # mathematical bold small x
+    "y" => "𝐲",  # mathematical bold small y
+    "z" => "𝐳"   # mathematical bold small z
+    )
+const _to_mathcal = Dict(
+    "A" => "𝒜",  # mathematical script capital a
+    "B" => "ℬ",  # mathematical script capital b
+    "C" => "𝒞",  # mathematical script capital c
+    "D" => "𝒟",  # mathematical script capital d
+    "E" => "ℰ",  # mathematical script capital e
+    "F" => "ℱ",  # mathematical script capital f
+    "G" => "𝒢",  # mathematical script capital g
+    "H" => "ℋ",  # mathematical script capital h
+    "I" => "ℐ",  # mathematical script capital i
+    "J" => "𝒥",  # mathematical script capital j
+    "K" => "𝒦",  # mathematical script capital k
+    "L" => "ℒ",  # mathematical script capital l
+    "M" => "ℳ",  # mathematical script capital m
+    "N" => "𝒩",  # mathematical script capital n
+    "O" => "𝒪",  # mathematical script capital o
+    "P" => "𝒫",  # mathematical script capital p
+    "Q" => "𝒬",  # mathematical script capital q
+    "R" => "ℛ",  # mathematical script capital r
+    "S" => "𝒮",  # mathematical script capital s
+    "T" => "𝒯",  # mathematical script capital t
+    "U" => "𝒰",  # mathematical script capital u
+    "V" => "𝒱",  # mathematical script capital v
+    "W" => "𝒲",  # mathematical script capital w
+    "X" => "𝒳",  # mathematical script capital x
+    "Y" => "𝒴",  # mathematical script capital y
+    "Z" => "𝒵",  # mathematical script capital z
+    "a" => "𝒶",  # mathematical script small a
+    "b" => "𝒷",  # mathematical script small b
+    "c" => "𝒸",  # mathematical script small c
+    "d" => "𝒹",  # mathematical script small d
+    "e" => "ℯ",  # mathematical script small e
+    "f" => "𝒻",  # mathematical script small f
+    "g" => "ℊ",  # mathematical script small g
+    "h" => "𝒽",  # mathematical script small h
+    "i" => "𝒾",  # mathematical script small i
+    "j" => "𝒿",  # mathematical script small j
+    "k" => "𝓀",  # mathematical script small k
+    "l" => "𝓁",  # mathematical script small l
+    "m" => "𝓂",  # mathematical script small m
+    "n" => "𝓃",  # mathematical script small n
+    "o" => "ℴ",  # mathematical script small o
+    "p" => "𝓅",  # mathematical script small p
+    "q" => "𝓆",  # mathematical script small q
+    "r" => "𝓇",  # mathematical script small r
+    "s" => "𝓈",  # mathematical script small s
+    "t" => "𝓉",  # mathematical script small t
+    "u" => "𝓊",  # mathematical script small u
+    "v" => "𝓋",  # mathematical script small v
+    "w" => "𝓌",  # mathematical script small w
+    "x" => "𝓍",  # mathematical script small x
+    "y" => "𝓎",  # mathematical script small y
+    "z" => "𝓏"   # mathematical script small z
+    )
+
+const _to_mathfrak = Dict(
+    "A" => "𝔄",  # mathematical fraktur capital a
+    "B" => "𝔅",  # mathematical fraktur capital b
+    "C" => "ℭ",  # mathematical fraktur capital c
+    "D" => "𝔇",  # mathematical fraktur capital d
+    "E" => "𝔈",  # mathematical fraktur capital e
+    "F" => "𝔉",  # mathematical fraktur capital f
+    "G" => "𝔊",  # mathematical fraktur capital g
+    "H" => "ℌ",  # mathematical fraktur capital h
+    "I" => "𝕴",  # mathematical fraktur capital i (bold)
+    "J" => "𝔍",  # mathematical fraktur capital j
+    "K" => "𝔎",  # mathematical fraktur capital k
+    "L" => "𝔏",  # mathematical fraktur capital l
+    "M" => "𝔐",  # mathematical fraktur capital m
+    "N" => "𝔑",  # mathematical fraktur capital n
+    "O" => "𝔒",  # mathematical fraktur capital o
+    "P" => "𝔓",  # mathematical fraktur capital p
+    "Q" => "𝔔",  # mathematical fraktur capital q
+    "R" => "𝕽",  # mathematical fraktur capital r (bold)
+    "S" => "𝔖",  # mathematical fraktur capital s
+    "T" => "𝔗",  # mathematical fraktur capital t
+    "U" => "𝔘",  # mathematical fraktur capital u
+    "V" => "𝔙",  # mathematical fraktur capital v
+    "W" => "𝔚",  # mathematical fraktur capital w
+    "X" => "𝔛",  # mathematical fraktur capital x
+    "Y" => "𝔜",  # mathematical fraktur capital y
+    "Z" => "ℨ",  # mathematical fraktur capital z
+    "a" => "𝔞",  # mathematical fraktur small a
+    "b" => "𝔟",  # mathematical fraktur small b
+    "c" => "𝔠",  # mathematical fraktur small c
+    "d" => "𝔡",  # mathematical fraktur small d
+    "e" => "𝔢",  # mathematical fraktur small e
+    "f" => "𝔣",  # mathematical fraktur small f
+    "g" => "𝔤",  # mathematical fraktur small g
+    "h" => "𝔥",  # mathematical fraktur small h
+    "i" => "𝔦",  # mathematical fraktur small i
+    "j" => "𝔧",  # mathematical fraktur small j
+    "k" => "𝔨",  # mathematical fraktur small k
+    "l" => "𝔩",  # mathematical fraktur small l
+    "m" => "𝔪",  # mathematical fraktur small m
+    "n" => "𝔫",  # mathematical fraktur small n
+    "o" => "𝔬",  # mathematical fraktur small o
+    "p" => "𝔭",  # mathematical fraktur small p
+    "q" => "𝔮",  # mathematical fraktur small q
+    "r" => "𝔯",  # mathematical fraktur small r
+    "s" => "𝔰",  # mathematical fraktur small s
+    "t" => "𝔱",  # mathematical fraktur small t
+    "u" => "𝔲",  # mathematical fraktur small u
+    "v" => "𝔳",  # mathematical fraktur small v
+    "w" => "𝔴",  # mathematical fraktur small w
+    "x" => "𝔵",  # mathematical fraktur small x
+    "y" => "𝔶",  # mathematical fraktur small y
+    "z" => "𝔷"   # mathematical fraktur small z
+    )
+const _to_mathbb = Dict(
+    "A" => "𝔸",  # mathematical double-struck capital a
+    "B" => "𝔹",  # mathematical double-struck capital b
+    "C" => "ℂ",  # mathematical double-struck capital c
+    "D" => "𝔻",  # mathematical double-struck capital d
+    "E" => "𝔼",  # mathematical double-struck capital e
+    "F" => "𝔽",  # mathematical double-struck capital f
+    "G" => "𝔾",  # mathematical double-struck capital g
+    "H" => "ℍ",  # mathematical double-struck capital h
+    "I" => "𝕀",  # mathematical double-struck capital i
+    "J" => "𝕁",  # mathematical double-struck capital j
+    "K" => "𝕂",  # mathematical double-struck capital k
+    "L" => "𝕃",  # mathematical double-struck capital l
+    "M" => "𝕄",  # mathematical double-struck capital m
+    "N" => "ℕ",  # mathematical double-struck capital o
+    "O" => "𝕆",  # mathematical double-struck capital o
+    "P" => "ℙ",  # mathematical double-struck capital p
+    "Q" => "ℚ",  # mathematical double-struck capital q
+    "R" => "ℝ",  # mathematical double-struck capital r
+    "S" => "𝕊",  # mathematical double-struck capital s
+    "T" => "𝕋",  # mathematical double-struck capital t
+    "U" => "𝕌",  # mathematical double-struck capital u
+    "V" => "𝕍",  # mathematical double-struck capital v
+    "W" => "𝕎",  # mathematical double-struck capital w
+    "X" => "𝕏",  # mathematical double-struck capital x
+    "Y" => "𝕐",  # mathematical double-struck capital y
+    "Z" => "ℤ",  # mathematical double-struck capital z
+    "a" => "𝕒",  # mathematical double-struck small a
+    "b" => "𝕓",  # mathematical double-struck small b
+    "c" => "𝕔",  # mathematical double-struck small c
+    "d" => "𝕕",  # mathematical double-struck small d
+    "e" => "𝕖",  # mathematical double-struck small e
+    "f" => "𝕗",  # mathematical double-struck small f
+    "g" => "𝕘",  # mathematical double-struck small g
+    "h" => "𝕙",  # mathematical double-struck small h
+    "i" => "𝕚",  # mathematical double-struck small i
+    "j" => "𝕛",  # mathematical double-struck small j
+    "k" => "𝕜",  # mathematical double-struck small k
+    "l" => "𝕝",  # mathematical double-struck small l
+    "m" => "𝕞",  # mathematical double-struck small m
+    "n" => "𝕟",  # mathematical double-struck small n
+    "o" => "𝕠",  # mathematical double-struck small o
+    "p" => "𝕡",  # mathematical double-struck small p
+    "q" => "𝕢",  # mathematical double-struck small q
+    "r" => "𝕣",  # mathematical double-struck small r
+    "s" => "𝕤",  # mathematical double-struck small s
+    "t" => "𝕥",  # mathematical double-struck small t
+    "u" => "𝕦",  # mathematical double-struck small u
+    "v" => "𝕧",  # mathematical double-struck small v
+    "w" => "𝕨",  # mathematical double-struck small w
+    "x" => "𝕩",  # mathematical double-struck small x
+    "y" => "𝕪",  # mathematical double-struck small y
+    "z" => "𝕫"   # mathematical double-struck small z
+    )
+
+const LETTER_TRANSLATION = Dict(
+    "mathbf"    => _to_mathbf,
+    "mathcal"   => _to_mathcal,
+    "mathbb"    => _to_mathbb,
+    "mathfrak"  => _to_mathfrak
+    )
+
+# this dictionary is for printing token names in debug
+const token_names = Dict(
+    TK_ID           =>   "TK_ID         ", 
+    TK_NUM          =>   "TK_NUM        ", 
+    #TK_SYM         =>   "TK_SYM        ", 
+    TK_FUN          =>   "TK_FUN        ", 
+    #TK_CMD         =>   "TK_CMD        ", 
+    TK_ENV          =>   "TK_ENV        ", 
+    TK_OPID         =>   "TK_OPID       ", 
+    #TK_OPID2       =>   "TK_OPID2      ", 
+    TK_LIM          =>   "TK_LIM        ",       
+    TK_INT          =>   "TK_INT        ",    
+    TK_BIGOP        =>   "TK_BIGOP      ", 
+    TK_LBRACE       =>   "TK_LBRACE     ", 
+    TK_RBRACE       =>   "TK_RBRACE     ", 
+    TK_SUB          =>   "TK_SUB        ", 
+    TK_SUP          =>   "TK_SUP        ", 
+    TK_AMP          =>   "TK_AMP        ", 
+    TK_NEWLINE      =>   "TK_NEWLINE    ", 
+    TK_TEXT         =>   "TK_TEXT       ", 
+    TK_SQRT         =>   "TK_SQRT       ", 
+    TK_FRAC         =>   "TK_FRAC       ", 
+    TK_LEFT         =>   "TK_LEFT       ", 
+    TK_RIGHT        =>   "TK_RIGHT      ", 
+    TK_MIDDLE       =>   "TK_MIDDLE     ", 
+    TK_BEGIN        =>   "TK_BEGIN      ", 
+    TK_END          =>   "TK_END        ", 
+    TK_BINOM        =>   "TK_BINOM      ", 
+    TK_OVERSET      =>   "TK_OVERSET    ", 
+    TK_UNDERSET     =>   "TK_UNDERSET   ", 
+    TK_OVERBRACE    =>   "TK_OVERBRACE  ", 
+    TK_UNDERBRACE   =>   "TK_UNDERBRACE ", 
+    TK_OVERACCENT   =>   "TK_OVERACCENT ", 
+    TK_UNDERACCENT  =>   "TK_UNDERACCENT",
+    TK_SPACE        =>   "TK_SPACE      ",
+    TK_BIG          =>   "TK_BIG        ", 
+    TK_PAREN        =>   "TK_PAREN      ", 
+    TK_ENV_NAME     =>   "TK_ENV_NAME   ",
+    TK_ENV_ATTR     =>   "TK_ENV_ATTR   ",
+    TK_OPNAME       =>   "TK_OPNAME     ",
+    TK_STYLE        =>   "TK_STYLE      ",
+    TK_IGSTYLE      =>   "TK_IGSTYLE    ",
+    TK_UNKNOWN      =>   "TK_UNKNOWN    "
+   )
+
+
